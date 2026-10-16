@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cleared: a payment agent that only pays what clears</title>
+<style>
+:root{--ink:#17150f;--paper:#f2eee4;--rule:#cdc6b4;--mute:#6b665a;--stamp:#b3261e}
+@media (prefers-color-scheme:dark){:root{--ink:#ebe7da;--paper:#11100d;--rule:#38352b;--mute:#8e897b;--stamp:#f0705f}}
+*{box-sizing:border-box}
+html{background:var(--paper)}
+body{margin:0;color:var(--ink);font:14px/1.55 ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+main{max-width:920px;margin:0 auto;padding:32px 18px 64px}
+h1{font-size:15px;letter-spacing:.14em;text-transform:uppercase;margin:0 0 6px}
+h2{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--mute);font-weight:400;margin:28px 0 8px}
+.sub{margin:0 0 24px;color:var(--mute);max-width:62ch}
+.bar{display:flex;flex-wrap:wrap;gap:8px 32px;border-top:1px solid var(--ink);border-bottom:1px solid var(--rule);padding:10px 0;margin-bottom:28px}
+.k{display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--mute)}
+form{display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px}
+label{display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--mute)}
+select,input{display:block;width:100%;margin-top:4px;padding:9px 10px;font:inherit;color:var(--ink);background:transparent;border:1px solid var(--ink);border-radius:0}
+.btns{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:10px}
+button{font:inherit;padding:10px 14px;border:1px solid var(--ink);background:transparent;color:var(--ink);border-radius:0;cursor:pointer}
+button.primary{background:var(--ink);color:var(--paper)}
+button:disabled{opacity:.5;cursor:wait}
+:focus-visible{outline:2px solid var(--stamp);outline-offset:2px}
+.hint{color:var(--mute);margin:10px 0 0;max-width:70ch}
+.err{color:var(--stamp);min-height:1.5em;margin:6px 0 0}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:780px}
+th{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--mute);text-align:left;font-weight:400;padding:6px 10px;border-bottom:1px solid var(--ink)}
+td{padding:8px 10px;border-bottom:1px solid var(--rule);vertical-align:top}
+td.num{text-align:right}
+.paid{font-weight:700}
+.stop{color:var(--stamp);font-weight:700}
+a{color:inherit}
+@media(max-width:640px){form{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+<h1>Cleared</h1>
+<p class="sub">An accounts-payable agent on Arc. It pays vendors in USDC, and a treasury contract caps what it can ever spend.</p>
+<div class="bar">
+  <div><span class="k">Treasury</span><span id="bal">loading</span></div>
+  <div><span class="k">Contract</span><a id="addr" target="_blank" rel="noopener">loading</a></div>
+  <div><span class="k">Network</span>Arc testnet</div>
+</div>
+<form id="f">
+  <label>Vendor<select id="vendor"></select></label>
+  <label>Amount, USDC<input id="amount" inputmode="decimal" value="2"></label>
+  <label>Invoice no.<input id="invoice" value="INV-101"></label>
+  <div class="btns">
+    <button type="submit" id="go" class="primary">Submit to agent</button>
+    <button type="button" id="bypass">Bypass the agent</button>
+  </div>
+</form>
+<p class="hint">Try INV-001 again, the unregistered vendor, an amount over the limit, or Northgate. Bypass simulates a compromised agent: policy checks are skipped and the contract decides alone.</p>
+<p class="err" id="err" role="status"></p>
+<h2>Ledger</h2>
+<div class="scroll">
+<table>
+<thead><tr><th>Time</th><th>Invoice</th><th>Vendor</th><th class="num">USDC</th><th>Decision</th><th>Layer</th><th>Reason</th><th>Tx</th></tr></thead>
+<tbody id="rows"></tbody>
+</table>
+</div>
+<p class="hint" id="empty">No entries yet.</p>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (u) => (Number(u) / 1e6).toFixed(2);
+const EXPLORER = "https://testnet.arcscan.app";
+let names = {};
+let rows = [];
+try { rows = JSON.parse(localStorage.getItem("cleared-ledger") || "[]"); } catch (e) {}
+
+async function loadState() {
+  const r = await fetch("/api/cleared");
+  const s = await r.json();
+  if (!r.ok) throw new Error(s.error || "could not load state");
+  $("bal").textContent = fmt(s.balance) + " USDC";
+  $("addr").textContent = s.treasury.slice(0, 8) + "..." + s.treasury.slice(-6);
+  $("addr").href = EXPLORER + "/address/" + s.treasury;
+  const sel = $("vendor");
+  const keep = sel.value;
+  sel.textContent = "";
+  names = {};
+  s.vendors.forEach((v) => {
+    names[v.id] = v.name;
+    const o = document.createElement("option");
+    o.value = v.id;
+    o.textContent = v.name + (v.cap === "0" ? " (not approved)" : " (limit " + fmt(v.cap) + ")");
+    sel.appendChild(o);
+  });
+  if (keep) sel.value = keep;
+}
+
+function render() {
+  const body = $("rows");
+  body.textContent = "";
+  rows.forEach((r) => {
+    const tr = document.createElement("tr");
+    [r.time, r.invoice, r.vendor, r.amount, r.decision, r.layer, r.reason].forEach((c, i) => {
+      const td = document.createElement("td");
+      td.textContent = c;
+      if (i === 3) td.className = "num";
+      if (i === 4) td.className = r.decision === "PAID" ? "paid" : "stop";
+      tr.appendChild(td);
+    });
+    const tx = document.createElement("td");
+    if (r.tx) {
+      const a = document.createElement("a");
+      a.href = EXPLORER + "/tx/" + r.tx;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = r.tx.slice(0, 10) + "...";
+      tx.appendChild(a);
+    } else {
+      tx.textContent = "none";
+    }
+    tr.appendChild(tx);
+    body.appendChild(tr);
+  });
+  $("empty").hidden = rows.length > 0;
+}
+
+function busy(on) {
+  $("go").disabled = on;
+  $("bypass").disabled = on;
+}
+
+async function send(mode) {
+  $("err").textContent = "";
+  busy(true);
+  try {
+    const vendor = $("vendor").value;
+    const body = { vendor, amount: $("amount").value, invoice: $("invoice").value, mode };
+    const r = await fetch("/api/cleared", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "request failed");
+    rows.unshift({
+      time: new Date().toLocaleTimeString([], { hour12: false }),
+      invoice: body.invoice,
+      vendor: names[vendor],
+      amount: Number(body.amount).toFixed(2),
+      decision: d.decision,
+      layer: d.layer,
+      reason: d.reason,
+      tx: d.tx || "",
+    });
+    rows = rows.slice(0, 50);
+    try { localStorage.setItem("cleared-ledger", JSON.stringify(rows)); } catch (e) {}
+    render();
+    loadState().catch(() => {});
+  } catch (e) {
+    $("err").textContent = e.message;
+  } finally {
+    busy(false);
+  }
+}
+
+$("f").addEventListener("submit", (e) => { e.preventDefault(); send("agent"); });
+$("bypass").addEventListener("click", () => send("bypass"));
+render();
+loadState().catch((e) => { $("err").textContent = e.message; });
+</script>
+</body>
+</html>
